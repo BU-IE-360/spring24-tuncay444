@@ -1,6 +1,6 @@
 # ÖMER FARUK TUNÇAY'S PROGRESS JOURNAL
 
-## Welcome to IE 360 My GitHub Page 
+## Welcome to My IE 360 GitHub Page 
 
 ### HOMEWORK 1
 
