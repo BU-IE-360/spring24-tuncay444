@@ -1,0 +1,596 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+# Necessary packaces are imported
+require(data.table)
+require(lubridate)
+require(forecast)
+require(skimr)
+require(repr)
+require(ggplot2)
+require(readxl)
+require(GGally)
+require(corrplot)
+```
+
+# Current Account
+
+## Motivation
+
+Current account basically shows the net amount of monetary operations made by a country. It is one of the most important macroeconomic indicators showing the well-being of an economy. As it affects the other economic policies of the country, it is affected by many indicators as well. The independent variables which are going to be used during time series analysis is listed below:
+
+-   Brent Petrol Price Index: Trade balance and energy production/consumption is main parameter determining the current account level. Brent petrol prices can be a significant measure considering it leads to changes in both trade balance and cost of energy consumption.
+
+-   Unemployement: Countries which can not produce its own consumptions have to import their goods and services from other countries which is directly related to current account. Unemployement is going to be a measurement to integrate the effect of the both production fo goods and services and the human capacity. (Labor force could also be used.)
+
+-   Exchange Rate: In countries with high exchange rate is unlikely to import goods and services and also likely to increase the export the goods and services due to low cost.
+
+-   Central Bank Reserve: Current account shows if a country is a buyer or a seller. Considering this, if a country is buyer this will consume its reserves and it is a seller its reserves should increase.
+
+## Importing Data
+
+```{r}
+c_account_all_data <- read_excel("~/Downloads/EVDS-10.xlsx")
+c_account_all_data <- data.table::as.data.table(c_account_all_data)
+
+colnames(c_account_all_data) <- c("Date", "brent_idx", "c_account", "reserve", "unemployement", "ex_rate" )
+c_account_all_data$Date <- as.Date(c_account_all_data$Date)
+
+head(c_account_all_data)
+str(c_account_all_data)
+```
+
+```{r}
+c_account_search_data <- read_excel("~/Downloads/multiTimeline-8.xlsx")
+c_account_search_data <- data.table::as.data.table(c_account_search_data)
+
+colnames(c_account_search_data) <- c("Date", "c_account_count")
+c_account_search_data$Date <- as.Date(c_account_search_data$Date)
+```
+
+```{r}
+c_account_merged_data<- merge(c_account_all_data, c_account_search_data, by = "Date", all = TRUE)
+```
+
+## Plot the Target Variable
+
+```{r}
+# CHATGPT PROMPT: I want to show both peak and bottom values and labels should be dates with months and years
+
+peak_indices_c <- which(diff(sign(diff(c_account_merged_data$c_account))) == -2) + 1
+bottom_indices_c <- which(diff(sign(diff(c_account_merged_data$c_account))) == +2) + 1
+
+peak_changes_c <- abs(c_account_merged_data$c_account[peak_indices_c] - c_account_merged_data$c_account[pmax(peak_indices_c - 2,3)])
+bottom_changes_c <- abs(c_account_merged_data$c_account[bottom_indices_c] - c_account_merged_data$c_account[pmax(bottom_indices_c - 2,3)])
+
+significant_peak_indices_c <- peak_indices_c[peak_changes_c > 1500]
+significant_bottom_indices_c <- bottom_indices_c[bottom_changes_c > 1500]
+
+combined_indices_c <- union(significant_peak_indices_c, significant_bottom_indices_c)
+
+extreme_data_c <- c_account_merged_data[combined_indices_c, ]
+ggplot(c_account_merged_data ,aes(x=Date,y=c_account)) + geom_line() +
+geom_point(data = extreme_data_c, aes(x = Date, y = c_account), color = "red", size = 1) +
+geom_text(data = extreme_data_c, aes(x = Date, y = c_account, label = format(Date, "%b %Y")), vjust = -1, color = "red", size=3) +
+scale_x_date(date_labels = "%b %Y", date_breaks = "6 months") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+We can see that there are peaks in a poisitive way during summer especailly August time. This is because Turkey has tourism income during summer holidays. And in winter time since heat consumption increases current account decreases. Therefore we can suggest that there is yearly seasonality in the data and it should be considered during modeling.
+
+## Plot the Target Variable vs Search Keyword
+
+```{r}
+ggplot(c_account_merged_data ,aes(x=Date,y=c_account)) + 
+geom_line(aes(y = scale(c_account), color = "Current Account")) +
+geom_line(aes(y = scale(c_account_count), color = "Search Count of Cari Açık")) +
+labs(title = "Current Account vs. Search Count of Cari Açık", x = "Date", y = "Count/Current Account") +
+scale_x_date(date_labels = "%b %Y", date_breaks = "6 months") + theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = c(0.2, 0.8))
+```
+
+"Cari Açık" is Turkish word for current account and it could be one of the best options to follow the trend in current account of Turkey. This plot shows that although the keyword and current account amount of Turkey is not correlated, during both peaks (after Jan 2018) and bottoms (after April 2021) there is interest in the keyword.
+
+## Correlations
+
+```{r message=FALSE}
+ggpairs(c_account_merged_data)
+```
+
+Since our target variable is current account, we can comment on the correlation and relation of this variable with the others. Although there is no information at first sight, we can say that reserve amount has negative correlation with the current account.
+
+## Time Series Analysis
+
+Since there is no obvious trend in target variable, we can start decomposing with examining seasonality and trend together.
+
+```{r}
+acf(c_account_merged_data$c_account,36)
+```
+
+We can implement yearly seasonality and examine the residual behavior before implementing independent variables.
+
+```{r}
+c_account_merged_data[,trnd:=1:.N]
+c_account_merged_data[,mon:=as.character(month(Date,label=T))]
+head(c_account_merged_data)
+```
+
+```{r}
+tmp_c=copy(c_account_merged_data)
+tmp_c[,actual:=c_account]
+```
+
+```{r}
+lm_base_c=lm(c_account~trnd+mon,c_account_merged_data)
+summary(lm_base_c)
+checkresiduals(lm_base_c)
+tmp_c[,predicted_trend_mon:=predict(lm_base_c,tmp_c)]
+tmp_c[,residual_trend_mon:=actual-predicted_trend_mon]
+```
+
+```{r}
+ggplot(tmp_c ,aes(x=Date)) +
+        geom_line(aes(y=actual,color='real')) + 
+        geom_line(aes(y=predicted_trend_mon,color='predicted'))
+```
+
+```{r}
+acf(tmp_c$residual_trend_mon,60)
+```
+
+Although we are already close to white noise, there is still improvement that should be implemented. There is cyclic behaviour in the residuals's autocorrelation but it repeats in 14-15 months. Since I could not justify that, I will not implement it. Let's plot the residuals and independent variables.
+
+```{r}
+p1_c <- ggplot(tmp_c, aes(x=brent_idx, y=residual_trend_mon)) +
+  geom_point()
+p2_c <- ggplot(tmp_c, aes(x=reserve, y=residual_trend_mon)) +
+  geom_point()
+p3_c <- ggplot(tmp_c, aes(x=unemployement, y=residual_trend_mon)) +
+  geom_point()
+p4_c <- ggplot(tmp_c, aes(x=ex_rate, y=residual_trend_mon)) +
+  geom_point()
+p5_c <- ggplot(tmp_c, aes(x=c_account_count, y=residual_trend_mon)) +
+  geom_point()
+gridExtra::grid.arrange(p1_c, p2_c, p3_c, p4_c, p5_c, nrow=2)
+```
+
+We can implement the unemployement and reserve variables into the model since they show somehow correlations with residuals. But in order not to risk multicolineartiy, let's first implement reserve and exchange rate variable.
+
+```{r}
+lm_base_c2=lm(c_account~trnd+mon+reserve,c_account_merged_data)
+summary(lm_base_c2)
+checkresiduals(lm_base_c2)
+tmp_c[,predicted_trend_mon_res:=predict(lm_base_c2,tmp_c)]
+tmp_c[,residual_trend_mon_res:=actual-predicted_trend_mon_res]
+```
+
+```{r}
+ggplot(tmp_c ,aes(x=Date)) +
+        geom_line(aes(y=actual,color='real')) + 
+        geom_line(aes(y=predicted_trend_mon_res,color='predicted'))
+```
+
+```{r}
+acf(tmp_c$residual_trend_mon_res,60)
+```
+
+Unfortunately, we still see serial correlation in residuals. This can be handles with differencing but to implement differencing, we should remove seasonality variables from the data.
+
+```{r}
+c_account_merged_data[,lag_1_c_account:=shift(c_account,1)]
+c_account_merged_data[,lag_1_diff:=c_account-lag_1_c_account]
+tmp_c[,lag_1_c_account:=shift(c_account,1)]
+tmp_c[,actual_lag_1_diff:=c_account-lag_1_c_account]
+c_account_merged_data = c_account_merged_data[complete.cases(c_account_merged_data)]
+acf(c_account_merged_data$lag_1_diff)
+acf(c_account_merged_data$lag_1_diff,lag=60)
+```
+
+We can observe that differencing prevents the serial correlation but yearly seasonality should still be implemented.
+
+```{r}
+lm_base_c3=lm(lag_1_diff~mon,c_account_merged_data)
+summary(lm_base_c3)
+checkresiduals(lm_base_c3)
+tmp_c[,predicted_diff_mon:=predict(lm_base_c3,tmp_c)]
+tmp_c[,residual_diff_mon:=actual_lag_1_diff-predicted_diff_mon]
+```
+
+```{r}
+ggplot(tmp_c ,aes(x=Date)) +
+        geom_line(aes(y=actual,color='real')) + 
+        geom_line(aes(y=predicted_diff_mon+lag_1_c_account,color='predicted'))
+```
+
+## Conclusion
+
+Throughout the analysis, firstly regression analysis was held but serial correlation did not vanished. Later any relation between independent and residuals could not be found. Therefore differencing is applied to get rid of serial correlation. After lag 1 difference, there were still relation in yearly seasonality, so yearly seasonality is also implemented to model. Results show that we reach the white noise and residuals are not correlated and almost between specified range (blue dotted lines). Predicted values and actual values are also plotted. And since previous current account could be a good indicator in terms of predicting next month, implementing lag1 differencing makes sense. (I am not sure if implementing the yearly seasonality to differencing model by using dummy variables instead of somehow integrating lag 12 difference but it decreased the correlation at the end)
+
+# Housing Sales
+
+## Motivation
+
+Housing sales are one of the most significant indicators of economic growth of a country. Although people usually tends to buy their own houses, there are many other factors for to buy or sell a house such as interest rates, other investment options, inflation rates etc. Independent variables which are chosen to be used in time series analysis is listed below:
+
+-   BIST 100 Index: Borsa Istanbul is an important option to when it comes to investment. It indicates the health of the companies operating in Turkey and when it is tend to increase, buying houses becomes less attractive to invest in.
+
+-   Interest Rate: Investing the money in the bank for a term and receiving interest and payments with it is another option for investment. Again, when interest rates increases, housing sales drops.
+
+-   Consumer Price Index: Inflation rate and CPI are the measures the value of the money in that country. Since housing market is investment option besides owning a house, it can be used as a protection from inflation.
+
+-   Unit Prices: Prices of houses and overall house market prices also determines the amount of sales in a way. Demands and supplies for houses is also critical for this.
+
+## Importing Data
+
+```{r}
+house_sales_all_data <- read_excel("~/Downloads/EVDS-11.xlsx")
+house_sales_all_data <- data.table::as.data.table(house_sales_all_data)
+
+colnames(house_sales_all_data) <- c("Date", "house_sales", "bist_idx", "interest_rate", "c_price_idx", "unit_price" )
+house_sales_all_data$Date <- as.Date(house_sales_all_data$Date)
+
+head(house_sales_all_data)
+str(house_sales_all_data)
+```
+
+```{r}
+house_sales_search_data <- read_excel("~/Downloads/multiTimeline-13.xlsx")
+house_sales_search_data <- data.table::as.data.table(house_sales_search_data)
+
+colnames(house_sales_search_data) <- c("Date", "tapu_search_count")
+house_sales_search_data$Date <- as.Date(house_sales_search_data$Date)
+```
+
+```{r}
+house_sales_merged_data<- merge(house_sales_all_data, house_sales_search_data, by = "Date", all = TRUE)
+```
+
+## Plot the Target Variable
+
+```{r}
+peak_indices_h <- which(diff(sign(diff(house_sales_merged_data$house_sales))) == -2) + 1
+bottom_indices_h <- which(diff(sign(diff(house_sales_merged_data$house_sales))) == +2) + 1
+
+peak_changes_h <- abs(house_sales_merged_data$house_sales[peak_indices_h] - house_sales_merged_data$house_sales[pmax(peak_indices_h - 1,1)])
+bottom_changes_h <- abs(house_sales_merged_data$house_sales[bottom_indices_h] - house_sales_merged_data$house_sales[pmax(bottom_indices_h - 1,1)])
+
+significant_peak_indices_h <- peak_indices_h[peak_changes_h > 14000]
+significant_bottom_indices_h <- bottom_indices_h[bottom_changes_h > 14000]
+
+combined_indices_h <- union(significant_peak_indices_h, significant_bottom_indices_h)
+
+extreme_data_h <- house_sales_merged_data[combined_indices_h, ]
+ggplot(house_sales_merged_data ,aes(x=Date,y=house_sales)) + geom_line() +
+geom_point(data = extreme_data_h, aes(x = Date, y = house_sales), color = "blue", size = 1) +
+geom_text(data = extreme_data_h, aes(x = Date, y = house_sales, label = format(Date, "%b %Y")), vjust = -1, color = "blue", size=2.5) +
+scale_x_date(date_labels = "%b %Y", date_breaks = "6 months") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+In this plot, obvious peaks in December time and significant drops after that can be seen. Significant fluctuations between July 2019 and Jan 2023 may be result of interest rates or other saving and investment options. (Especially due to covid conditions)
+
+## Plot the Target Variable vs Search Keyword
+
+```{r}
+ggplot(house_sales_merged_data ,aes(x=Date,y=house_sales)) + 
+geom_line(aes(y = scale(house_sales), color = "House Sales")) +
+geom_line(aes(y = scale(tapu_search_count), color = "Search Count of Tapu")) +
+labs(title = "House Sales vs. Search Count of Tapu", x = "Date", y = "Count/House Sales") +
+scale_x_date(date_labels = "%b %Y", date_breaks = "6 months") + theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = c(0.2, 0.8))
+```
+
+"Tapu" is a Turkish word representing the processes and documents during house buying or selling. It is a strong word to see the trends in house sales as we can see in the plot. There is an upward trend in search count since some of the processes is held online in time but fluctuations in both housing sales and search count is correlated.
+
+## Correlations
+
+```{r message=FALSE}
+ggpairs(house_sales_merged_data)
+```
+
+In this plot, when we observe the relation of other variables with housing sales (target variable), we can see that interest rates and bist index have somehow negative correlation and also both consumer price index and house unit prices show negative correlation. It would be risky to use both variable in a model since they are strongly correlated between themselves and that would effect the coefficients and interpretability of the model.
+
+## Time Series Analysis
+
+Like in current account data, since there is no obvious trend in target variable, we can start decomposing with examining seasonality and trend together.
+
+```{r}
+acf(house_sales_merged_data$house_sales,36)
+```
+
+We can implement yearly seasonality and examine the residual behavior before implementing independent variables.
+
+```{r}
+house_sales_merged_data[,trnd:=1:.N]
+house_sales_merged_data[,mon:=as.character(month(Date,label=T))]
+head(house_sales_merged_data)
+```
+
+```{r}
+tmp_h=copy(house_sales_merged_data)
+tmp_h[,actual:=house_sales]
+```
+
+```{r}
+lm_base_h=lm(house_sales~trnd+mon,house_sales_merged_data)
+summary(lm_base_h)
+checkresiduals(lm_base_h)
+tmp_h[,predicted_trend_mon:=predict(lm_base_h,tmp_h)]
+tmp_h[,residual_trend_mon:=actual-predicted_trend_mon]
+```
+
+```{r}
+ggplot(tmp_h ,aes(x=Date)) +
+        geom_line(aes(y=actual,color='real')) + 
+        geom_line(aes(y=predicted_trend_mon,color='predicted'))
+```
+
+```{r}
+acf(tmp_h$residual_trend_mon,60)
+```
+
+Although we removed yearly seasonality from the data, R-squared value shows that the model performs poorly. Let's examine the relation between the residuals and independent varibales.
+
+```{r}
+p1_h <- ggplot(tmp_h, aes(x=bist_idx, y=residual_trend_mon)) +
+  geom_point()
+p2_h <- ggplot(tmp_h, aes(x=interest_rate, y=residual_trend_mon)) +
+  geom_point()
+p3_h <- ggplot(tmp_h, aes(x=c_price_idx, y=residual_trend_mon)) +
+  geom_point()
+p4_h <- ggplot(tmp_h, aes(x=unit_price, y=residual_trend_mon)) +
+  geom_point()
+p5_h <- ggplot(tmp_h, aes(x=tapu_search_count, y=residual_trend_mon)) +
+  geom_point()
+gridExtra::grid.arrange(p1_h, p2_h, p3_h, p4_h, p5_h, nrow=2)
+```
+
+To avoid multicolinearity, let's implement interest rates (since there seems a negative correlation) information to model.
+
+```{r}
+lm_base_h2=lm(house_sales~trnd+mon+interest_rate,house_sales_merged_data)
+summary(lm_base_h2)
+checkresiduals(lm_base_h2)
+tmp_h[,predicted_trend_mon_int:=predict(lm_base_h2,tmp_h)]
+tmp_h[,residual_trend_mon_int:=actual-predicted_trend_mon_int]
+```
+
+```{r}
+ggplot(tmp_h ,aes(x=Date)) +
+        geom_line(aes(y=actual,color='real')) + 
+        geom_line(aes(y=predicted_trend_mon_int,color='predicted'))
+```
+
+```{r}
+p1_h2 <- ggplot(tmp_h, aes(x=bist_idx, y=residual_trend_mon_int)) +
+  geom_point()
+p2_h2 <- ggplot(tmp_h, aes(x=interest_rate, y=residual_trend_mon_int)) +
+  geom_point()
+p3_h2 <- ggplot(tmp_h, aes(x=c_price_idx, y=residual_trend_mon_int)) +
+  geom_point()
+p4_h2 <- ggplot(tmp_h, aes(x=unit_price, y=residual_trend_mon_int)) +
+  geom_point()
+p5_h2 <- ggplot(tmp_h, aes(x=tapu_search_count, y=residual_trend_mon_int)) +
+  geom_point()
+gridExtra::grid.arrange(p1_h2, p2_h2, p3_h2, p4_h2, p5_h2, nrow=2)
+```
+
+Let's implement the search count of "Tapu" word to somehow integrate fluctuations into the model.
+
+```{r}
+lm_base_h3=lm(house_sales~trnd+mon+interest_rate+tapu_search_count,house_sales_merged_data)
+summary(lm_base_h3)
+checkresiduals(lm_base_h3)
+tmp_h[,predicted_trend_mon_int_count:=predict(lm_base_h3,tmp_h)]
+tmp_h[,residual_trend_mon_int_count:=actual-predicted_trend_mon_int_count]
+```
+
+```{r}
+ggplot(tmp_h ,aes(x=Date)) +
+        geom_line(aes(y=actual,color='real')) + 
+        geom_line(aes(y=predicted_trend_mon_int_count,color='predicted'))
+```
+
+```{r}
+acf(tmp_h$residual_trend_mon_int_count,60)
+```
+
+## Conclusion
+
+We started to time series data decomposition by implementing trend and yearly seasonality variables after we examined the autocorrelation of the target variable. Although we saw that residuals reached to white noise model, metrics and residual-independent variables scatter plots confirmed that there could be improvement. To avoid multicolinearity in the model we added only interest rate to the lineer model. After that to implement fluctuations to the model, search count of "Tapu" word is also added to the model. As it can be seen in both R-square metric and actual-predicted value plot model showed great improvement.
+
+# Term Deposit Amount (1 Month)
+
+## Motivation
+
+Large number of investors consider term deposit (vadeli mevduat in Turkish) as a safe investment. Although it attracts many people, overall term deposit amount in the banks fluctuates especially on the countries with fluctuating interest rates and inflation. In this time series analysis, term deposit amount in Turkish Liras will be analyzed with the independent variables below:
+
+-   Exchange Rates: While one option is incesting in term deposit, investing in currency is another option to directly effects the amount of deposit in the banks. Increasing exchange rates could lead people to invest in currency instead of term deposits.
+
+-   Interest Rate: High interest rates are the main reason people want to invest their money in bank deposits. High interest rates (especially higher than inflation or increase in exchange rate) would lead to higher amount of money in bank term deposits.
+
+-   Consumer Price Index: Inflation rate and CPI are the main reasons people want to invest their money and protect their buying power. High inflation discourages people to invest in term deposits since the real value of the money in the deposit may decrease as time goes.
+
+-   House Price Index: Although this does not necessarily affects the amount of money in bank term deposits, house price index can be seen as an alternative option to invest depending on the amount of interest rates.
+
+## Importing Data
+
+```{r}
+term_deposit_all_data <- read_excel("~/Downloads/EVDS-12.xlsx")
+term_deposit_all_data <- data.table::as.data.table(term_deposit_all_data)
+
+colnames(term_deposit_all_data) <- c("Date", "ex_rate", "interest_rate", "deposit_amount", "consumer_price_idx", "house_price_idx")
+term_deposit_all_data$Date <- as.Date(term_deposit_all_data$Date)
+
+head(term_deposit_all_data)
+str(term_deposit_all_data)
+```
+
+```{r}
+term_deposit_search_data <- read_excel("~/Downloads/multiTimeline-14.xlsx")
+term_deposit_search_data <- data.table::as.data.table(term_deposit_search_data)
+
+colnames(term_deposit_search_data) <- c("Date", "vadeli_mevduat_count")
+term_deposit_search_data$Date <- as.Date(term_deposit_search_data$Date)
+```
+
+```{r}
+term_deposit_merged_data<- merge(term_deposit_all_data, term_deposit_search_data, by = "Date", all = TRUE)
+```
+
+## Plot the Target Variable
+
+```{r}
+# Calculate percentage changes for peaks and troughs
+peak_percentage_changes_t <- 100 * abs(((term_deposit_merged_data$deposit_amount[peak_indices_t] / term_deposit_merged_data$deposit_amount[pmax(peak_indices_t - 1, 1)]) - 1))
+bottom_percentage_changes_t <- 100 * abs(((term_deposit_merged_data$deposit_amount[bottom_indices_t] / term_deposit_merged_data$deposit_amount[pmax(bottom_indices_t - 1, 1)]) - 1))
+
+# Filter significant peaks and troughs based on percentage change
+significant_peak_indices_t <- peak_indices_t[peak_percentage_changes_t > 6]  # Adjust the threshold as needed
+significant_bottom_indices_t <- bottom_indices_t[bottom_percentage_changes_t > 6]  # Adjust the threshold as needed
+
+# Combine indices for significant peaks and troughs
+combined_indices_t <- union(significant_peak_indices_t, significant_bottom_indices_t)
+
+# Extract data for significant peaks and troughs
+extreme_data_t <- term_deposit_merged_data[combined_indices_t, ]
+
+# Plot with logarithmic scale and percentage labels
+ggplot(term_deposit_merged_data, aes(x = Date, y = deposit_amount)) +
+  geom_line() +
+  scale_y_log10() +  # Apply logarithmic scale
+  geom_point(data = extreme_data_t, aes(x = Date, y = deposit_amount), color = "purple", size = 2) +
+  geom_text(data = extreme_data_t, aes(x = Date, y = deposit_amount, label=format(Date, "%b %Y")), vjust = -1, color = "purple", size = 2) +
+  scale_x_date(date_labels = "%b %Y", date_breaks = "6 months") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+Term deposits show a clear uptrend through time. Although there could be many factors forcing this trend, the main reason should be the exchange rates and inflation.
+
+## Plot the Target Variable vs Search Keyword
+
+```{r}
+ggplot(term_deposit_merged_data ,aes(x=Date,y=deposit_amount)) + 
+geom_line(aes(y = scale(deposit_amount), color = "Term Deposit Amount")) +
+geom_line(aes(y = scale(vadeli_mevduat_count), color = "Search Count of Vadeli Mevduat")) +
+labs(title = "Term Deposit Amount vs. Search Count of Vadeli Mevduat", x = "Date", y = "Count/Deposit Amount") +
+scale_x_date(date_labels = "%b %Y", date_breaks = "6 months") + theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = c(0.2, 0.8))
+
+```
+
+"Vadeli mevduat" is a Turkish word for term deposit. Although it is not obvious due to scaling at the beginning of the plot, there is correlation between search count and amount of term deposits. After 2018 both of them shows upward trend. Search count showed some picks during some intervals. This could be due to sudden government policies in economy.
+
+## Correlations
+
+```{r message=FALSE}
+ggpairs(term_deposit_merged_data)
+```
+
+In this plot, deposit amount shows strong correlation with many independent variables. This would be nice if the correlation among this independent variables would not be high as well (Multicolinearity). This should be taken care of during modeling.
+
+## Time Series Analysis
+
+In this target variable we see an obvious trend upwards throghout the years. Let's see the autocorrelation plot of target variable.
+
+```{r}
+acf(term_deposit_merged_data$deposit_amount,36)
+```
+
+Seasonality does not show up in the autocorrelation.
+
+```{r}
+term_deposit_merged_data[,trnd:=1:.N]
+head(term_deposit_merged_data)
+```
+
+```{r}
+tmp_t=copy(term_deposit_merged_data)
+tmp_t[,actual:=deposit_amount]
+```
+
+```{r}
+lm_base_t=lm(deposit_amount~trnd,term_deposit_merged_data)
+summary(lm_base_t)
+checkresiduals(lm_base_t)
+tmp_t[,predicted_trend:=predict(lm_base_t,tmp_t)]
+tmp_t[,residual_trend:=actual-predicted_trend]
+```
+
+Residuals show high autocorrelation. Although this can be handled with differencing let's first examine the independent variables.
+
+```{r}
+p1_t <- ggplot(tmp_t, aes(x=ex_rate, y=residual_trend)) +
+  geom_point()
+p2_t <- ggplot(tmp_t, aes(x=interest_rate, y=residual_trend)) +
+  geom_point()
+p3_t <- ggplot(tmp_t, aes(x=consumer_price_idx, y=residual_trend)) +
+  geom_point()
+p4_t <- ggplot(tmp_t, aes(x=house_price_idx, y=residual_trend)) +
+  geom_point()
+p5_t <- ggplot(tmp_t, aes(x=vadeli_mevduat_count, y=residual_trend)) +
+  geom_point()
+gridExtra::grid.arrange(p1_t, p2_t, p3_t, p4_t, p5_t, nrow=2)
+```
+
+For the sake of increasing accuracy of the model, lineer terms are added to the model.
+
+```{r}
+term_deposit_merged_data[,ex_rate_sq:=ex_rate^2]
+term_deposit_merged_data[,consumer_price_idx_sq:=consumer_price_idx^2]
+tmp_t[,ex_rate_sq:=ex_rate^2]
+tmp_t[,consumer_price_idx_sq:=consumer_price_idx^2]
+```
+
+```{r}
+lm_base_t1 = lm(deposit_amount~.,data=term_deposit_merged_data)
+summary(lm_base_t1)
+checkresiduals(lm_base_t1)
+tmp_t[,predicted_trend_sq:=predict(lm_base_t1,tmp_t)]
+tmp_t[,residual_trend_sq:=actual-predicted_trend_sq]
+```
+
+```{r}
+p1_t2 <- ggplot(tmp_t, aes(x=ex_rate, y=residual_trend_sq)) +
+  geom_point()
+p2_t2 <- ggplot(tmp_t, aes(x=interest_rate, y=residual_trend_sq)) +
+  geom_point()
+p3_t2 <- ggplot(tmp_t, aes(x=consumer_price_idx, y=residual_trend_sq)) +
+  geom_point()
+p4_t2 <- ggplot(tmp_t, aes(x=house_price_idx, y=residual_trend_sq)) +
+  geom_point()
+p5_t2 <- ggplot(tmp_t, aes(x=vadeli_mevduat_count, y=residual_trend_sq)) +
+  geom_point()
+gridExtra::grid.arrange(p1_t2, p2_t2, p3_t2, p4_t2, p5_t2, nrow=2)
+```
+
+```{r}
+ggplot(tmp_t ,aes(x=Date)) +
+        geom_line(aes(y=actual,color='real')) + 
+        geom_line(aes(y=predicted_trend_sq,color='predicted'))
+```
+
+## Conclusion
+
+Term deposit amount in Turkey has shown upwards trend in years. There were no evidence indicating any seasonality. Therefore trend variable is implemented to the model. There were high serial correlation in the residuals. Residuals had relation with independent variables more similar to square terms. Square terms of independent variables has been implemented but lineer terms showed better performance in terms of serial correlation of residuals.
+
+# Correlation Between Target Variables
+
+```{r}
+all_target_data <- cbind(c_account_all_data$c_account, house_sales_all_data$house_sales, term_deposit_all_data$deposit_amount)
+
+all_target_data <- as.data.table(all_target_data)
+
+setnames(all_target_data, c("c_account", "house_sales", "deposit_amount"))
+
+print(all_target_data)
+```
+
+```{r}
+# CHATGPT PROMPT: I need to create a data table taking one column from each data table and merge them.
+cor_matrix <- cor(all_target_data)
+
+corrplot(cor_matrix, method = "color", type = "upper", order = "hclust",
+         addCoef.col = "black",
+         tl.col = "black", tl.srt = 45)
+```
